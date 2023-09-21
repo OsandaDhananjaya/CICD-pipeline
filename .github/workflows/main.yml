@@ -1,0 +1,101 @@
+name: CI Workflow Artifact Build
+'on':
+  push:
+    branches:
+      - dev
+jobs:
+  build:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      - name: Read value from Properties-file
+        id: read_property
+        uses: christian-draeger/read-properties@1.1.1
+        with:
+          path: ./workflow.properties
+          properties: >-
+            JAVA_VERSION GITHUB_TOKEN ENVIRONMENT DESTINATION_DIR_DEV
+            DESTINATION_DIR_PREPROD DESTINATION_DIR_PROD WAR_DEST_DIR
+      - name: Do something with your bumped release version
+        run: 'echo ${{ steps.read_property.outputs.JAVA_VERSION}}'
+      - name: 'Set up JDK ${{ steps.read_property.outputs.JAVA_VERSION}}'
+        uses: actions/setup-java@v3
+        with:
+          java-version: '${{ steps.read_property.outputs.JAVA_VERSION}}'
+          distribution: temurin
+          cache: maven
+      - name: List changed
+        id: list-changes
+        run: >
+          echo "Changed files:"
+
+          git diff --name-only ${{ github.event.before }} ${{ github.sha }} >
+          changed_files.txt
+
+          cat changed_files.txt
+      - name: Build Only Updated Maven project and copy the artifacts
+        env:
+          GITHUB_TOKEN: '${{ steps.read_property.outputs.GITHUB_TOKEN}}'
+          ENVIRONMENT: '${{ steps.read_property.outputs.ENVIRONMENT}}'
+        id: select_edited
+        run: |
+          cd carbonapp-development
+          updated_folders=()
+          i=0
+          for project in $(find . -maxdepth 1 -type d -not -name '.'); do
+            echo $project
+            if [ -f "$project/pom.xml" ] && grep -q "$project/" ../changed_files.txt; then
+              echo "Building $project"
+              updated_folders[i]=$project
+              i+=1
+            else
+              echo "No updated file found"
+            fi
+          done
+          echo "updated_folders=${updated_folders[@]}" >> "$GITHUB_OUTPUT"
+      - name: Build Updated Maven
+        env:
+          GITHUB_TOKEN: '${{ steps.read_property.outputs.GITHUB_TOKEN}}'
+          ENVIRONMENT: '${{ steps.read_property.outputs.ENVIRONMENT}}'
+        if: steps.select_edited.outputs.updated_folders != ''
+        run: |
+          folder_array="${{ steps.select_edited.outputs.updated_folders }}"
+          mkdir -p ${{ github.workspace }}/artifacts
+          read -ra updated_folder_array <<< "$folder_array"
+          cd carbonapp-development
+          for project in "${updated_folder_array[@]}"; do
+            echo "Project Folder: $project"
+            cd "$project"
+            echo "current directory is: $(pwd)"
+            mvn clean install -Dmaven.test.skip=true
+            find . -type f -name "*.car" -exec cp {} ${{ github.workspace }}/artifacts \;
+            cd ..
+          done 
+      - name: Copy CAR files to destination directory
+        if: steps.select_edited.outputs.updated_folders != ''
+        run: >
+          cp ${{ github.workspace }}/artifacts/* ${{
+          steps.read_property.outputs.DESTINATION_DIR_DEV}}/repository/deployment/server/carbonapps/
+      - name: Print CAR files in the destination directory
+        run: >
+          ls ${{
+          steps.read_property.outputs.DESTINATION_DIR_DEV}}/repository/deployment/server/carbonapps/
+      - name: Deploy to PREPROD
+        env:
+          ENVIRONMENT: 'Preprod'
+        run: |
+          cp ${{ github.workspace }}/artifacts/* ${{ steps.read_property.outputs.DESTINATION_DIR_PREPROD}}/repository/deployment/server/carbonapps/
+          ls ${{
+          steps.read_property.outputs.DESTINATION_DIR_PREPROD}}/repository/deployment/server/carbonapps/
+      - name: Deploy to PROD
+        env:
+          ENVIRONMENT: 'Prod'
+        run: >
+          cp ${{ github.workspace }}/artifacts/* ${{
+          steps.read_property.outputs.DESTINATION_DIR_PROD}}/repository/deployment/server/carbonapps/
+
+          ls ${{
+          steps.read_property.outputs.DESTINATION_DIR_PROD}}/repository/deployment/server/carbonapps/
